@@ -1,0 +1,10 @@
+deepagents
+langchain-ollama
+pydantic>=2
+typer[all]
+rich
+mss
+Pillow
+imagehash
+pygetwindow
+pytest
