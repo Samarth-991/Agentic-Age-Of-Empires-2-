@@ -4,6 +4,7 @@
 > It watches your screen. You play the game. It tells you exactly what to do next.
 
 ---
+![image](https://github.com/Samarth-991/Agentic-Age-Of-Empires-2-/blob/main/images/annotated_frame_1.jpg)
 
 ## Why This Project Exists
 
