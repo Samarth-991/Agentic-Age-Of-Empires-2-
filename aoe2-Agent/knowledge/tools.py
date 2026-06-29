@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from ..config import KB_BUILDINGS, KB_CIVS, KB_COUNTERS, KB_UNITS
+from config import KB_BUILDINGS, KB_CIVS, KB_COUNTERS, KB_UNITS ,KB_SUMMARY
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,12 @@ def _load_buildings() -> list[dict]:
     with open(KB_BUILDINGS, encoding="utf-8") as f:
         return json.load(f)
 
+@lru_cache(maxsize=1)
+def _load_summary():
+    with open (KB_SUMMARY,'r' ,encoding='utf-8') as file:
+        markdown_content = file.read()
+    return markdown_content
+
 
 def _fuzzy_find(records: list[dict], name: str, key: str = "name") -> dict | None:
     """Case-insensitive substring search across a list of records."""
@@ -64,6 +70,59 @@ def _fmt(obj: Any) -> str:
 # ---------------------------------------------------------------------------
 # Tool functions (registered by Deep Agents)
 # ---------------------------------------------------------------------------
+
+def get_summary_info() -> str:
+    """Return the AoE2 Strategic Reference — a concise master cheat-sheet covering
+    the full unit counter matrix, key strategic principles, common build orders,
+    and age advancement costs.
+
+    Call this tool FIRST at the start of every strategy cycle, before consulting
+    any other sub-agent. It gives you the strategic skeleton — the high-level
+    principles and build-order context — that every other tool call should be
+    interpreted through.
+
+    What this tool returns:
+
+    1. UNIT COUNTER MATRIX
+       All major archetypes (archer, cavalry, infantry, spearman, skirmisher,
+       knight, siege, monk, camel, eagle_warrior) with strong_vs and weak_vs.
+       Use for a quick directional counter check before calling get_unit_counters
+       for deeper detail.
+
+    2. KEY STRATEGIC PRINCIPLES
+       Six universal rules that apply in every game regardless of civilization:
+       - Rock-paper-scissors hierarchy (Archers > Infantry > Cavalry > Archers)
+       - Economy-first: more villagers = more resources = bigger army
+       - Never stop villager production until 120+ (or committing all-in)
+       - Scout early: know what the opponent is making, then counter it
+       - Composition over mass: mixed armies cover individual unit weaknesses
+       - Upgrades beat numbers: fully upgraded units outperform 1.5× un-upgraded
+
+    3. COMMON BUILD ORDERS
+       Exact villager assignments and timing gates for the three core openings:
+       - Fast Castle into Knights (booming / defensive opener)
+       - Scouts into Knights (aggressive Feudal-to-Castle transition)
+       - Archers Feudal Rush (early military pressure)
+       Cross-reference these against the current snapshot population and buildings
+       to judge whether the player is on track, ahead, or behind schedule.
+
+    4. AGE ADVANCEMENT COSTS AND TIMES
+       Feudal: 500F / 130s | Castle: 800F + 200G / 160s | Imperial: 1000F + 800G / 190s
+       Use when advising on whether the player has the resources to advance now,
+       and how long they will be exposed during the transition.
+
+    When to use:
+        - At the start of every strategy cycle for orientation
+        - When assessing whether the player's opening is on track
+        - When advising on age-up timing or resource thresholds
+        - Before diving into civ-specific or unit-specific tool calls
+        - Any time you need general strategic framing, not KB lookups
+
+    Returns:
+        Full contents of summary.md as a plain string.
+    """
+    summary_data = _load_summary()
+    return summary_data.strip()
 
 
 def get_civilization_info(civ_name: str) -> str:
@@ -175,4 +234,5 @@ def get_building_info(building_name: str) -> str:
 
 
 # Expose all tools as a list for easy import
-KB_TOOLS = [get_civilization_info, get_unit_counters, get_unit_stats, get_building_info]
+# get_summary_info is listed first — it is the orientation tool called every cycle
+KB_TOOLS = [get_summary_info, get_civilization_info, get_unit_counters, get_unit_stats, get_building_info]
