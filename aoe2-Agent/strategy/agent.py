@@ -2,7 +2,7 @@
 
 Architecture: Subagents-as-Tools
 ---------------------------------
-Instead of giving the Supervisor raw KB functions, we create five *specialized
+Instead of giving the Supervisor raw KB functions, we create six *specialized
 sub-agents*, each an expert on one knowledge domain, and then wrap each one
 as a LangChain @tool.  The Supervisor (main Strategist) calls these tools,
 and each tool internally runs its own Deep Agent with focused context.
@@ -12,14 +12,15 @@ Pattern (mirrors 05_subagents_as_tool.ipynb):
   sub-agent (create_deep_agent) → wrapped as @tool → Supervisor (create_deep_agent)
 
 Sub-agents:
-  CivilizationAnalyst  — civ bonuses, unique units/techs
-  CounterAnalyst       — unit counter relationships
-  UnitStatsAdvisor     — unit HP/attack/cost comparisons
-  BuildingAdvisor      — building costs, categories, functions
-  MatchupAnalyst       — player civ vs opponent civ strengths/weaknesses (NEW)
+  StrategicReferenceAdvisor — summary.md: counter matrix, build orders, principles (call FIRST)
+  CivilizationAnalyst       — civ bonuses, unique units/techs
+  CounterAnalyst            — unit counter relationships (deep detail)
+  UnitStatsAdvisor          — unit HP/attack/cost comparisons
+  BuildingAdvisor           — building costs, categories, functions
+  MatchupAnalyst            — player civ vs opponent civ strengths/weaknesses
 
 Supervisor receives the GameStateSnapshot (+ both civilizations) and delegates
-domain questions to the five sub-agents, then synthesises a final strategy update.
+domain questions to the six sub-agents, then synthesises a final strategy update.
 """
 from __future__ import annotations
 
@@ -32,14 +33,15 @@ from typing import Callable, Deque
 from deepagents import create_deep_agent
 from langchain_core.tools import tool
 
-from ..config import STRATEGY_MODEL, STRATEGIST_INTERVAL_SECS
-from ..knowledge.tools import (
+from config import STRATEGY_MODEL, STRATEGIST_INTERVAL_SECS
+from knowledge.tools import (
     get_building_info,
     get_civilization_info,
+    get_summary_info,
     get_unit_counters,
     get_unit_stats,
 )
-from ..schemas import GameStateSnapshot
+from schemas import GameStateSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,24 @@ _OLLAMA_PREFIX = f"ollama:{STRATEGY_MODEL}"
 # ---------------------------------------------------------------------------
 # Sub-agent system prompts
 # ---------------------------------------------------------------------------
+
+_STRATEGIC_REF_PROMPT = """\
+You are the Strategic Reference Advisor for Age of Empires II.
+Your sole job: answer questions using get_summary_info, which returns the
+master strategic reference covering:
+  - Unit counter matrix (all major archetypes, strong_vs and weak_vs)
+  - Six universal strategic principles (economy, RPS, upgrades, scouting, etc.)
+  - Three common build orders with exact villager assignments and timing gates
+  - Age advancement costs and research times for all three ages
+
+Call get_summary_info to retrieve the full reference, then answer the query directly
+from its content. Do not invent information not present in the reference.
+
+Use this as the strategic backbone that frames every other piece of advice:
+  - Before recommending a build order, confirm it matches the reference
+  - Before naming a counter unit, cross-check against the counter matrix
+  - Before advising on age-up, confirm the player has the required resources
+"""
 
 _CIV_PROMPT = """\
 You are a Civilization Analyst for Age of Empires II.
@@ -98,17 +118,19 @@ You are the Strategist for an Age of Empires II: Definitive Edition coaching ass
 Player civilization: {player_civ}
 Opponent civilization: {opponent_civ}
 
-You have five specialist sub-agents available as tools:
-- consult_civ_analyst      — look up any civilization's bonuses and unique units
-- consult_counter_analyst  — unit counter relationships
-- consult_unit_stats       — unit HP, attack, armour, costs
-- consult_building_advisor — building costs and functions
-- consult_matchup_analyst  — {player_civ} vs {opponent_civ} strengths, weaknesses, and threats
+You have six specialist sub-agents available as tools:
+- consult_strategic_reference — CALL THIS FIRST every cycle: counter matrix, build orders, strategic principles, age costs
+- consult_matchup_analyst     — {player_civ} vs {opponent_civ} strengths, weaknesses, and threats
+- consult_civ_analyst         — look up any civilization's bonuses and unique units
+- consult_counter_analyst     — deep unit counter detail
+- consult_unit_stats          — unit HP, attack, armour, costs
+- consult_building_advisor    — building costs and functions
 
 Your job:
 1. Read the GameStateSnapshot provided in the user message.
-2. Always consult consult_matchup_analyst first to understand the civ dynamics,
-   then use other tools for specific facts as needed.
+2. Call consult_strategic_reference FIRST to orient yourself on build orders,
+   principles, and the counter matrix. Then call consult_matchup_analyst to
+   understand the civ dynamics. Use other tools for specific facts as needed.
    Every factual claim MUST come from a sub-agent tool — do not invent stats.
 3. Produce a concise strategy update in exactly this format:
 
@@ -132,6 +154,14 @@ Keep the output short enough to read at a glance. Advise the human player only.
 # ---------------------------------------------------------------------------
 # Sub-agent builders
 # ---------------------------------------------------------------------------
+
+def _build_strategic_reference_advisor():
+    return create_deep_agent(
+        model=_OLLAMA_PREFIX,
+        tools=[get_summary_info],
+        system_prompt=_STRATEGIC_REF_PROMPT,
+    )
+
 
 def _build_civ_analyst():
     return create_deep_agent(
@@ -176,6 +206,11 @@ def _build_matchup_analyst(player_civ: str, opponent_civ: str):
         ),
     )
 
+def build_basic_strategy():
+    return create_deep_agent(
+        model = _OLLAMA_PREFIX,
+        tools = []
+    )
 
 # ---------------------------------------------------------------------------
 # Wrap sub-agents as @tool (pattern from 05_subagents_as_tool.ipynb)
@@ -200,11 +235,33 @@ def build_kb_subagent_tools(player_civ: str, opponent_civ: str):
     Called once per session so each sub-agent is constructed fresh and the
     closures capture their own agent instance.
     """
-    civ_agent      = _build_civ_analyst()
-    counter_agent  = _build_counter_analyst()
-    unit_agent     = _build_unit_stats_advisor()
-    building_agent = _build_building_advisor()
-    matchup_agent  = _build_matchup_analyst(player_civ, opponent_civ)
+    strategic_ref_agent = _build_strategic_reference_advisor()
+    civ_agent           = _build_civ_analyst()
+    counter_agent       = _build_counter_analyst()
+    unit_agent          = _build_unit_stats_advisor()
+    building_agent      = _build_building_advisor()
+    matchup_agent       = _build_matchup_analyst(player_civ, opponent_civ)
+
+    @tool
+    def consult_strategic_reference(query: str) -> str:
+        """Consult the Strategic Reference Advisor for the AoE2 master cheat-sheet.
+
+        Call this FIRST every strategy cycle. Returns the complete strategic reference
+        containing the unit counter matrix, six key strategic principles, three common
+        build orders with exact villager assignments, and age advancement costs.
+
+        Use for:
+        - Checking which unit type counters the enemy's army composition
+        - Verifying whether the player's build order is on schedule
+        - Confirming resources needed before advising an age-up
+        - Grounding any general strategic advice in universal principles
+
+        Input: any question about general strategy, counters, build orders, or age costs.
+        Example: "What counters cavalry archers?", "Is the player on track for Fast Castle?",
+                 "How much does Castle Age cost?"
+        """
+        result = strategic_ref_agent.invoke({"messages": [{"role": "user", "content": query}]})
+        return _extract_last_content(result)
 
     @tool
     def consult_civ_analyst(query: str) -> str:
@@ -263,11 +320,12 @@ def build_kb_subagent_tools(player_civ: str, opponent_civ: str):
         return _extract_last_content(result)
 
     return [
+        consult_strategic_reference,   # always call first — orientation tool
+        consult_matchup_analyst,       # always call second — civ dynamics
         consult_civ_analyst,
         consult_counter_analyst,
         consult_unit_stats,
         consult_building_advisor,
-        consult_matchup_analyst,
     ]
 
 
