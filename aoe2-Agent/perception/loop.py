@@ -17,14 +17,14 @@ from typing import Callable, Deque
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..config import (
+from config import (
     OLLAMA_BASE_URL,
     VLM_MODEL,
     PERCEPTION_INTERVAL_SECS,
     SCREENSHOT_OUT_DIR,
     HASH_THRESHOLD,
 )
-from ..schemas import GameStateSnapshot
+from schemas import GameStateSnapshot
 from .capture import CaptureLoop
 
 log = logging.getLogger(__name__)

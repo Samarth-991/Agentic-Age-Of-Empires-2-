@@ -1,25 +1,67 @@
 """Screenshot capture with perceptual-hash deduplication.
 
-Adapted from old/src/aoe2_coach/capture/screenshot.py — refactored to be
-importable without old/ path hacks and to accept a Config object.
+Uses PowerShell's System.Drawing.Graphics.CopyFromScreen via subprocess —
+the only approach that works reliably from WSL2 where the Linux display
+stack cannot access the Windows screen.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional, Tuple
 
 import imagehash
 from PIL import Image
-import mss
+
+# Windows path where PowerShell writes screenshots
+_WIN_SCREENSHOTS = r"E:\Personal\Samarth\repository\AOE-Agent\images\screenshots"
+# Corresponding WSL path (shared between Windows and WSL2)
+_WSL_SCREENSHOTS = Path("/mnt/e/Personal/Samarth/repository/AOE-Agent/images/screenshots")
+
+
+def capture_screenshot(bbox: Optional[Tuple[int, int, int, int]] = None) -> Image.Image:
+    """Capture the Windows primary screen via PowerShell and return a PIL Image (RGB).
+
+    Uses System.Drawing.Graphics.CopyFromScreen — WSL2 compatible because
+    powershell.exe runs natively on Windows and writes to a path both sides share.
+    The bbox parameter is accepted for API compatibility but ignored; PowerShell
+    always captures the full primary screen.
+
+    Raises:
+        subprocess.CalledProcessError: if PowerShell exits with a non-zero code.
+        FileNotFoundError: if the saved PNG cannot be found at the expected WSL path.
+    """
+    _WSL_SCREENSHOTS.mkdir(parents=True, exist_ok=True)
+    filename = f"cap_{int(time.time() * 1000)}.png"
+    windows_path = f"{_WIN_SCREENSHOTS}\\{filename}"
+    wsl_path = _WSL_SCREENSHOTS / filename
+
+    powershell_cmd = (
+        "[Reflection.Assembly]::LoadWithPartialName('System.Drawing') | Out-Null; "
+        "[Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+        "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+        "$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height; "
+        "$graphics = [System.Drawing.Graphics]::FromImage($bmp); "
+        "$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); "
+        f"$bmp.Save('{windows_path}', [System.Drawing.Imaging.ImageFormat]::Png); "
+        "$graphics.Dispose(); $bmp.Dispose();"
+    )
+    subprocess.run(
+        ["powershell.exe", "-Command", powershell_cmd],
+        check=True,
+        capture_output=True,
+    )
+    return Image.open(wsl_path).convert("RGB")
 
 
 def get_aoe2_window_bbox() -> Optional[Tuple[int, int, int, int]]:
     """Best-effort: locate the AoE2 window and return (left, top, width, height).
 
-    Returns None when the window isn't found or pygetwindow isn't installed.
-    Falls back to full-screen capture in the loop.
+    Returns None when the window is not found or pygetwindow is not installed.
+    When the game runs fullscreen the PowerShell capture covers the entire
+    primary screen, so a bbox is not strictly required.
     """
     try:
         import pygetwindow as gw
@@ -34,18 +76,6 @@ def get_aoe2_window_bbox() -> Optional[Tuple[int, int, int, int]]:
     return None
 
 
-def capture_screenshot(bbox: Optional[Tuple[int, int, int, int]] = None) -> Image.Image:
-    """Capture screen (or a region) and return a PIL Image in RGB mode."""
-    with mss.mss() as s:
-        if bbox is None:
-            monitor = s.monitors[1]
-        else:
-            left, top, width, height = bbox
-            monitor = {"left": left, "top": top, "width": width, "height": height}
-        raw = s.grab(monitor)
-        return Image.frombytes("RGB", raw.size, raw.rgb)
-
-
 def save_screenshot(img: Image.Image, out_dir: str = "logs/screenshots") -> str:
     """Save image to out_dir with millisecond timestamp; return the file path."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -55,11 +85,11 @@ def save_screenshot(img: Image.Image, out_dir: str = "logs/screenshots") -> str:
 
 
 class CaptureLoop:
-    """Manages one-shot and continuous screenshot capture with dedup.
+    """Manages one-shot screenshot capture with perceptual-hash deduplication.
 
     Attributes:
         out_dir: Directory where screenshots are written.
-        interval: Seconds between captures.
+        interval: Seconds between captures (informational; not enforced here).
         hash_threshold: Perceptual-hash diff below which VLM call is skipped.
     """
 
@@ -75,10 +105,6 @@ class CaptureLoop:
         self._last_hash: Optional[imagehash.ImageHash] = None
         self._last_mini_hash: Optional[imagehash.ImageHash] = None
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _hash(self, img: Image.Image, size: Tuple[int, int] = (64, 64)) -> imagehash.ImageHash:
         return imagehash.average_hash(img.resize(size).convert("L"))
 
@@ -88,19 +114,14 @@ class CaptureLoop:
         mw, mh = int(w * 0.18), int(h * 0.18)
         return img.crop((w - mw, h - mh, w, h))
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def run_once(self) -> Tuple[str, Image.Image, bool]:
-        """Capture one frame.
+        """Capture one frame and evaluate whether the VLM should be called.
 
         Returns:
-            (path, img, needs_vlm) where needs_vlm is False when the frame
-            is visually too similar to the previous one to warrant a VLM call.
+            (path, img, needs_vlm) — needs_vlm is False when the frame is
+            visually too similar to the previous one to warrant a VLM call.
         """
-        bbox = get_aoe2_window_bbox()
-        img = capture_screenshot(bbox=bbox)
+        img = capture_screenshot()
         path = save_screenshot(img, out_dir=self.out_dir)
 
         current_hash = self._hash(img)
@@ -109,7 +130,11 @@ class CaptureLoop:
         needs_vlm = True
         if self._last_hash is not None:
             diff = current_hash - self._last_hash
-            mini_diff = (mini_hash - self._last_mini_hash) if self._last_mini_hash is not None else 99
+            mini_diff = (
+                mini_hash - self._last_mini_hash
+                if self._last_mini_hash is not None
+                else 99
+            )
             if diff <= self.hash_threshold and mini_diff <= (self.hash_threshold // 2):
                 needs_vlm = False
 
